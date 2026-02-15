@@ -1,4 +1,4 @@
-package org.hexils.jitpr;
+package org.hetils.jitpr;
 
 import java.util.HashMap;
 import java.util.Map;

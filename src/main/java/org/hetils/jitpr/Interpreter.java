@@ -1,15 +1,37 @@
-package org.hexils.jitpr;
+package org.hetils.jitpr;
 
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 
 
 public class Interpreter {
+
+    public static Optional<Integer> parseInt(char[] chars, int start, int end) {
+        if (
+                start == end ||
+                        (chars[start] == '-' && end-start == 1)
+        ) return Optional.empty();
+        int out = 0;
+        boolean pos = true;
+        int i = start;
+        if (chars[0] == '-') {
+            pos = false;
+            i++;
+        }
+        for (; i <= end; i++) {
+            char c = chars[i];
+            if (c == '-') pos = false;
+            else if (c < 48 || c > 57) return Optional.empty();
+            else {
+                out *= 10;
+                out += c - 48;
+            }
+        }
+        return Optional.of(pos ? out : -out);
+    }
 
     public static boolean isEmpty(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
     public static boolean isEmpty(char @NotNull [] chars, int start, int end) {
@@ -179,7 +201,6 @@ public class Interpreter {
 
     private Map<String, Map<String, VarFunc>> mltplx_commands = new HashMap<>();
     private Map<String, VarFunc> singleton_commands = new HashMap<>();
-    private String MSG_KEY = "msg";
     private final Map<String, Object> global_variables = new HashMap<>();
     public Interpreter() {}
     public Interpreter(Map<String, Map<String, VarFunc>> mltplx_commands) {
@@ -200,6 +221,7 @@ public class Interpreter {
         private final Object[] vars;
         private int global_cmd_index = 0;
         private int c_cmd = 0;
+        private String msg;
         private VariableSet(char @NotNull [] command) {
             int end = command.length - 1;
 //            int len = paramCount(command, 0, end);
@@ -270,17 +292,19 @@ public class Interpreter {
         public boolean has(String variable) { return global_variables.containsKey(variable); }
 
         public Object set(String var_name, Object value) { return global_variables.put(var_name, value); }
-        public Object setMsg(String value) {
-            msg_set = true;
-            return global_variables.put(MSG_KEY, value);
+
+        // message
+        public void setMsg(String msg) { this.msg = msg; }
+        public String getMsg() { return msg; }
+        Object trmsg(Object val) {
+            if (msg == null) msg = Objects.toString(val);
+            return val;
         }
-        public String getMsg() { return (String) global_variables.get(MSG_KEY); }
+        void freeMsg() { this.msg = null; }
     }
 
     public Object getVar(String var_name) { return global_variables.get(var_name); }
     public Object setVar(String var_name, Object value) { return global_variables.put(var_name, value); }
-
-    public String getLastMsg() { return (String) global_variables.get(MSG_KEY); }
 
     public void rootCommand(String cmd, Map<String, VarFunc> mappings) {
         mltplx_commands.put(cmd, mappings);
@@ -291,21 +315,14 @@ public class Interpreter {
     }
 
     // Execution
-    private Object returnWithMsg(Object val) {
-        if (!msg_set) {
-            global_variables.put(MSG_KEY, Objects.toString(val));
-            msg_set = true;
-        }
-        return val;
-    }
-    private boolean msg_set = false;
-    public Object handle(@NotNull String input) {
+    public Object process(@NotNull String input) {
         char[] chars = input.toCharArray();
-        return handle(chars, 0, chars.length-1, new VariableSet(chars));
+        VariableSet vs = new VariableSet(chars);
+        handle(chars, 0, chars.length-1, vs);
+        return vs.msg;
     }
     public @Nullable Object handle(char[] chars, int start, int end, VariableSet variables) {
-        if (end == 0 || isEmpty(chars, start, end)) return returnWithMsg(null);
-        msg_set = false;
+        if (end == 0 || isEmpty(chars, start, end)) return variables.trmsg(null);
 
         while (isWrapped(chars, start, end)) {
             while (start < end && chars[start] != '(') start++;
@@ -357,6 +374,7 @@ public class Interpreter {
 
                     // inset command
                     Object obj = handle(chars, next_start, i-1, variables);
+                    variables.freeMsg();
                     variables.set(
                             cmd_index,
                             param_count++,
@@ -389,18 +407,28 @@ public class Interpreter {
             else i++;
         }
 
-
         String cmd = null;
-        if (val) cmd = new String(chars, next_start, i - next_start);
+        if (val) cmd = new String(chars, next_start, i-next_start);
 
         if (val && param_count != 0) {
             variables.set(cmd_index, param_count++, cmd);
         }
 
         variables.currentCommand(cmd_index);
+        for (int j = 0; j < variables.length(); j++) {
+            if (variables.at(j) instanceof String varn && varn.startsWith("$")) {
+                if (j == 0 && variables.has(j+1) && variables.at(j+1) instanceof String posib_eq && "=".equals(posib_eq)) {
+                    j++;
+                    continue;
+                }
+                String key = varn.substring(1);
+                variables.set(cmd_index, j, global_variables.get(key));
+            }
+        }
+
 //        System.out.printf("cmi: %d\tCmd: %s\tpc %d\thas 0: %b\n", cmd_index, cmd, param_count, variables.has(0));
         if (param_count > 0) {
-            if (!variables.has(0)) return returnWithMsg(null);
+            if (!variables.has(0)) return variables.trmsg(null);
             else if (variables.at(0) instanceof String str) {
                 cmd = str;
             }
@@ -409,9 +437,17 @@ public class Interpreter {
         if (cmd != null) {
 //            System.out.println("Executing cmd " + cmd);
 
+            if (cmd.startsWith("$")) {
+                if (variables.has(1) && "=".equalsIgnoreCase(variables.at(1))) {
+                    Object at = variables.at(2);
+                    global_variables.put(cmd.substring(1), at);
+                    return variables.trmsg(cmd + " = " + at);
+                }
+            }
+
             VarFunc func = singleton_commands.get(cmd);
             if (func != null) {
-                return returnWithMsg(func.apply(variables.withLocalOffset(cmd_index, 1)));
+                return variables.trmsg(func.apply(variables.withLocalOffset(cmd_index, 1)));
             }
             if (param_count > 1) {
                 // try running a root command
@@ -419,13 +455,13 @@ public class Interpreter {
                 if ((maps = mltplx_commands.get(cmd)) != null) {
                     VarFunc b = maps.get((String) variables.at((1)));
                     if (b != null) {
-                        return returnWithMsg(b.apply(variables.withLocalOffset(cmd_index, 2)));
+                        return variables.trmsg(b.apply(variables.withLocalOffset(cmd_index, 2)));
                     }
                 }
             }
         }
 
-        if (param_count == 0) return returnWithMsg(cmd);
+        if (param_count == 0) return variables.trmsg(cmd);
 
         Mapper mapper;
         int len = variables.length();
@@ -457,7 +493,7 @@ public class Interpreter {
             }
         }
 
-        return ctx;
+        return variables.trmsg(ctx);
     }
 
 }

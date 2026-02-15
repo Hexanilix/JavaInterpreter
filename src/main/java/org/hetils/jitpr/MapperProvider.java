@@ -1,4 +1,4 @@
-package org.hexils.jitpr;
+package org.hetils.jitpr;
 
 public interface MapperProvider {
     Mapper getCall();
