@@ -4,37 +4,15 @@ import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.time.Instant;
 import java.util.*;
+import java.util.function.Function;
 
 
 public class Interpreter {
 
-    public static Optional<Integer> parseInt(char[] chars, int start, int end) {
-        if (
-                start == end ||
-                        (chars[start] == '-' && end-start == 1)
-        ) return Optional.empty();
-        int out = 0;
-        boolean pos = true;
-        int i = start;
-        if (chars[0] == '-') {
-            pos = false;
-            i++;
-        }
-        for (; i <= end; i++) {
-            char c = chars[i];
-            if (c == '-') pos = false;
-            else if (c < 48 || c > 57) return Optional.empty();
-            else {
-                out *= 10;
-                out += c - 48;
-            }
-        }
-        return Optional.of(pos ? out : -out);
-    }
-
-    public static boolean isEmpty(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
-    public static boolean isEmpty(char @NotNull [] chars, int start, int end) {
+    private static boolean isEmpty(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
+    private static boolean isEmpty(char @NotNull [] chars, int start, int end) {
         for (int i = start; i <= end; i++) {
             char c = chars[i];
             if (!isEmpty(c)) return false;
@@ -42,10 +20,10 @@ public class Interpreter {
         return true;
     }
 
-    public static boolean isWrapped(char[] chars, int start, int end) {
+    private static boolean isWrapped(char[] chars, int start, int end) {
         // find first opening bracket
         while (start <= end && isEmpty(chars[start])) start++;
-        if (chars[start] != '(') return false;
+        if (start >= end || chars[start] != '(') return false;
 
         // find last closing bracket
         while (end > start && isEmpty(chars[end])) end--;
@@ -64,7 +42,7 @@ public class Interpreter {
     }
     
     @Contract(pure = true)
-    public static int functionCount(char @NotNull [] chars, int start, int end) {
+    private static int functionCount(char @NotNull [] chars, int start, int end) {
         int param_count = 0;
 
         while (isWrapped(chars, start, end)) {
@@ -115,7 +93,7 @@ public class Interpreter {
         return param_count;
     }
 
-    public static class IntArr {
+    private static class IntArr {
         final int[] data;
         int i = 0;
         public IntArr(int size) {
@@ -123,10 +101,8 @@ public class Interpreter {
         }
         public void set(int indx, int num) { data[indx] = num; }
     }
-    public static void countParamPerFunc(char[] chars, int start, int end, IntArr arr) {
+    private static void countParamPerFunc(char[] chars, int start, int end, IntArr arr) {
         int param_count = 0;
-
-//        System.out.println("Counting params in " + new String(chars, start, end-start+1));
 
         while (isWrapped(chars, start, end)) {
             while (start < end && chars[start] != '(') start++;
@@ -136,8 +112,6 @@ public class Interpreter {
         }
 
         int indx = arr.i++;
-
-//        System.out.println("Counting p params in " + new String(chars, start, end-start+1));
 
         int i = start;
         int next_start = start;
@@ -171,7 +145,6 @@ public class Interpreter {
                     while (i <= end && chars[i] == ' ');
 
                     param_count++;
-                    next_start = i;
                 }
                 else if (isEmpty(c)) {
                     if (val) {
@@ -179,10 +152,8 @@ public class Interpreter {
                         val = false;
                     }
                     i++;
-                    next_start = i;
                 }
                 else {
-                    if (!val) next_start = i;
                     val = true;
                     i++;
                 }
@@ -190,21 +161,48 @@ public class Interpreter {
             else i++;
         }
 
-        if (next_start < i) {
-            param_count++;
-        }
-
-//        System.out.println("Foud " + param_count + " params in " + new String(chars, start, end-start+1));
+        if (val) param_count++;
 
         arr.set(indx, param_count == 1 ? 0 : param_count);
     }
 
-    private Map<String, Map<String, VarFunc>> mltplx_commands = new HashMap<>();
-    private Map<String, VarFunc> singleton_commands = new HashMap<>();
+    private final Map<String, VarFunc> commands;
     private final Map<String, Object> global_variables = new HashMap<>();
-    public Interpreter() {}
-    public Interpreter(Map<String, Map<String, VarFunc>> mltplx_commands) {
-        this.mltplx_commands = mltplx_commands;
+    public Interpreter() {
+        this(new HashMap<>(), true);
+    }
+    public Interpreter(Map<String, VarFunc> commands) {
+        this(commands, true);
+    }
+    public Interpreter(Map<String, VarFunc> commands, boolean add_basic_commands) {
+        this.commands = commands;
+        if (add_basic_commands) {
+            addBasicCommands();
+        }
+    }
+
+    private void addBasicCommands() {
+        rootCommand("print", vars -> {
+            StringBuilder sb = new StringBuilder();
+            boolean com = false;
+            for (int i = 0; i < vars.length(); i++) {
+                if (com) sb.append(", ");
+                sb.append(Objects.toString(vars.get(i)));
+                com = true;
+            }
+            return sb.toString();
+        }, false);
+        rootCommand("time", vars -> {
+            int len = vars.length();
+            if (len == 0) return Date.from(Instant.now());
+            else {
+                String sel = vars.get(0);
+                return switch (sel) {
+                    case "ms" -> System.currentTimeMillis();
+                    default -> "Invalid time selection \"" + sel + "\"";
+                };
+            }
+        }, false);
     }
 
     @Contract(pure = true)
@@ -221,74 +219,135 @@ public class Interpreter {
         private final Object[] vars;
         private int global_cmd_index = 0;
         private int c_cmd = 0;
+        private int local_offset = 0;
+        private boolean error = false;
         private String msg;
         private VariableSet(char @NotNull [] command) {
             int end = command.length - 1;
-//            int len = paramCount(command, 0, end);
             int fc = functionCount(command, 0, end) + 1;
-//            System.out.printf("Counted %d funcs\n", fc);
             IntArr arr = new IntArr(fc);
             countParamPerFunc(command, 0, end, arr);
             cmd_var_counts = arr.data;
-//            System.out.println("Lens: " + Arrays.toString(arr.data));
             this.vars = new Object[sum(cmd_var_counts, cmd_var_counts.length)];
         }
 
-        public int next() {
+        private int next() {
             global_cmd_index++;
             return global_cmd_index-1;
         }
 
-        public void set(int cmd_index, int offset, Object val) {
-//            System.out.printf("+ {%s} for %d at %d + %d: ",
-//                    val,
-//                    cmd_index,
-//                    sum(cmd_var_counts, cmd_index),
-//                    offset
-//            );
+        private void set(int cmd_index, int offset, Object val) {
             vars[sum(cmd_var_counts, cmd_index) + offset] = val;
-//            System.out.println(Arrays.toString(vars));
         }
 
-        public int length() {
-            return sum(cmd_var_counts, c_cmd) + cmd_var_counts[c_cmd] - local_offset;
-        }
 
-        private int local_offset = 0;
-        public VariableSet withLocalOffset(int cmd_index, int offset) {
+        private VariableSet withLocalOffset(int cmd_index, int offset) {
             this.local_offset = sum(cmd_var_counts, cmd_index) + offset;
             this.c_cmd = cmd_index;
-//            System.out.printf("Set vars to start at ")
             return this;
         }
 
-        public void currentCommand(int command) {
+        private void currentCommand(int command) {
             this.local_offset = sum(cmd_var_counts, command);
             this.c_cmd = command;
-//            System.out.printf("# Current beggingin for %d is %d\n", curr_cmd, i);
         }
 
-        private int getLocalI(int index) { return index+local_offset; }
+        private int locI(int index) { return index+local_offset; }
+
+        public int length() {
+            return Math.max(sum(cmd_var_counts, c_cmd) + cmd_var_counts[c_cmd] - local_offset, 0);
+        }
 
         public boolean has(int index) {
-            return index >= 0 && index+local_offset < vars.length && index < cmd_var_counts[c_cmd];
+            return index >= 0 && locI(index) < vars.length && index < cmd_var_counts[c_cmd];
         }
 
         // Getting locals
-        public <T> T at(int index) {
-//            System.out.printf("> cmd: %d\t i: %d\tloc: %d\n", c_cmd, index, getLocalI(index));
-            return (T) vars[getLocalI(index)];
+        public <T> T get(int index) {
+            return (T) vars[locI(index)];
         }
-        public <T> T at(int index, Class<T> cast) { return (T) vars[getLocalI(index)]; }
-        public Object ats(int index) { return vars[getLocalI(index)]; }
+        public <T> T get(int index, Class<T> cast) { return (T) vars[locI(index)]; }
+        public <T> T getOr(int index, T def, Class<T> cast) {
+            return has(index) ? (T) vars[locI(index)] : def;
+        }
+        public Object getS(int index) { return vars[locI(index)]; }
+        public int getInt(int index) {
+            if (vars[locI(index)] instanceof Integer i) {
+                return i;
+            } else return Integer.parseInt(Objects.toString(vars[locI(index)]));
+        }
+        public long getLong(int index) {
+            if (vars[locI(index)] instanceof Long lng) {
+                return lng;
+            } else return Long.parseLong(Objects.toString(vars[locI(index)]));
+        }
+        public float getFloat(int index) {
+            if (vars[locI(index)] instanceof Float itgr) {
+                return itgr;
+            } else return Float.parseFloat(Objects.toString(vars[locI(index)]));
+        }
+        public double getDouble(int index) {
+            if (vars[locI(index)] instanceof Double i) {
+                return i;
+            } else return Double.parseDouble(Objects.toString(vars[locI(index)]));
+        }
 
-        public Object[] local() { return vars; }
-
+        public <T> T getOr(int index, T def) {
+            return has(index) ? (T) vars[locI(index)] : def;
+        }
+        public int getIntOr(int index, int def) {
+            if (!has(index)) {
+                return def;
+            }
+            int i = locI(index);
+            try {
+                if (vars[i] instanceof Integer itgr) {
+                    return itgr;
+                } else return Integer.parseInt(Objects.toString(vars[i]));
+            } catch (NumberFormatException e) {
+                return def;
+            }
+        }
+        public long getLongOr(int index, long def) {
+            if (!has(index)) {
+                return def;
+            }
+            int i = locI(index);
+            try {
+                if (vars[i] instanceof Long lng) {
+                    return lng;
+                } else return Long.parseLong(Objects.toString(vars[i]));
+            } catch (NumberFormatException e) {
+                return def;
+            }
+        }
+        public float getFloatOr(int index, float def) {
+            if (!has(index)) return def;
+            int i = locI(index);
+            try {
+                if (vars[i] instanceof Float flt) {
+                    return flt;
+                } else return Float.parseFloat(Objects.toString(vars[i]));
+            } catch (NumberFormatException e) {
+                return def;
+            }
+        }
+        public double getDoubleOr(int index, double def) {
+            if (!has(index)) return def;
+            int i = locI(index);
+            try {
+                if (vars[i] instanceof Double dble) {
+                    return dble;
+                } else return Double.parseDouble(Objects.toString(vars[i]));
+            } catch (NumberFormatException e) {
+                return def;
+            }
+        }
 
         // Global vars
         public <T> T get(String variable) { return (T) global_variables.get(variable); }
         public <T> T get(String variable, Class<T> cast) { return (T) global_variables.get(variable); }
-        public Object ats(String variable) { return global_variables.get(variable); }
+        public Object getS(String variable) { return global_variables.get(variable); }
         public boolean has(String variable) { return global_variables.containsKey(variable); }
 
         public Object set(String var_name, Object value) { return global_variables.put(var_name, value); }
@@ -296,204 +355,218 @@ public class Interpreter {
         // message
         public void setMsg(String msg) { this.msg = msg; }
         public String getMsg() { return msg; }
-        Object trmsg(Object val) {
-            if (msg == null) msg = Objects.toString(val);
-            return val;
+        public void err(String error_msg) {
+            this.error = true;
+            this.msg = error_msg;
         }
-        void freeMsg() { this.msg = null; }
     }
 
     public Object getVar(String var_name) { return global_variables.get(var_name); }
     public Object setVar(String var_name, Object value) { return global_variables.put(var_name, value); }
 
     public void rootCommand(String cmd, Map<String, VarFunc> mappings) {
-        mltplx_commands.put(cmd, mappings);
+        rootCommand(cmd, mappings, true);
+    }
+    public void rootCommand(String cmd, Map<String, VarFunc> mappings, boolean override) {
+        Mapper mper = new Mapper(mappings);
+        if (override) commands.put(cmd, vars -> mper);
+        else commands.putIfAbsent(cmd, vars -> mper);
     }
 
     public void rootCommand(String cmd, VarFunc func) {
-        singleton_commands.put(cmd, func);
+        rootCommand(cmd, func, true);
+    }
+    public void rootCommand(String cmd, VarFunc func, boolean override) {
+        if (override) commands.put(cmd, func);
+        else commands.putIfAbsent(cmd, func);
     }
 
     // Execution
-    public Object process(@NotNull String input) {
+    public void assrt(@NotNull String input, @NotNull Function<Object, Boolean> eval) {
         char[] chars = input.toCharArray();
         VariableSet vs = new VariableSet(chars);
-        handle(chars, 0, chars.length-1, vs);
-        return vs.msg;
+        Object r = handle(chars, 0, chars.length-1, vs);
+        if (!eval.apply(r)) throw new RuntimeException("Bad behavior for \"" + input + "\"");
     }
-    public @Nullable Object handle(char[] chars, int start, int end, VariableSet variables) {
-        if (end == 0 || isEmpty(chars, start, end)) return variables.trmsg(null);
+    public String process(@NotNull String input) {
+        char[] chars = input.toCharArray();
+        VariableSet vs = new VariableSet(chars);
+        Object res = handle(chars, 0, chars.length-1, vs);
+        return vs.msg != null ? vs.msg : Objects.toString(res);
+    }
+    private @Nullable Object handle(char[] chars, int start, int end, VariableSet variables) {
+        try {
+            if (end == 0 || isEmpty(chars, start, end)) return null;
 
-        while (isWrapped(chars, start, end)) {
-            while (start < end && chars[start] != '(') start++;
-            start++;
-            while (end >= start && chars[end] != ')') end--;
-            end--;
-        }
-        //trim ends
-        while (start < end && isEmpty(chars[start])) start++;
-        while (end > start && isEmpty(chars[end])) end--;
-
-        int cmd_index = variables.next();
-
-//        System.out.println("Handling: " + new String(chars, start, end-start+1) + " @" + cmd_index);
-
-        int param_count = 0;
-
-        int i = start;
-        int next_start = start;
-        boolean val = false;
-        boolean dq = false;
-        boolean sq = false;
-        while (i <= end) {
-            char c = chars[i];
-
-            if (c == '\"') {
-                dq = !dq;
-                if (dq) next_start = i+1;
+            while (isWrapped(chars, start, end)) {
+                while (start < end && chars[start] != '(') start++;
+                start++;
+                while (end >= start && chars[end] != ')') end--;
+                end--;
             }
-            else if (c == '\'') {
-                sq = !sq;
-                if (sq) next_start = i+1;
-            }
+            //trim ends
+            while (start < end && isEmpty(chars[start])) start++;
+            while (end > start && isEmpty(chars[end])) end--;
 
-            if (!(dq || sq)) {
-                if (c == '(') {
-                    next_start = ++i;
-                    int depth = 0;
-                    while (i <= end) {
-                        if (chars[i] == '(') depth++;
-                        else if (chars[i] == ')') {
-                            if (depth == 0) {
-                                break;
-                            }
-                            depth--;
-                        }
-                        i++;
-                    }
+            int cmd_index = variables.next();
 
-                    // inset command
-                    Object obj = handle(chars, next_start, i-1, variables);
-                    variables.freeMsg();
-                    variables.set(
-                            cmd_index,
-                            param_count++,
-                            obj
-                    );
+            int param_count = 0;
 
-                    do i++;
-                    while (i <= end && chars[i] == ' ');
+            int i = start;
+            int next_start = start;
+            boolean val = false;
+            boolean dq = false;
+            boolean sq = false;
+            while (i <= end) {
+                char c = chars[i];
 
-                    next_start = i;
+                if (c == '\"') {
+                    dq = !dq;
+                    if (dq) next_start = i + 1;
+                } else if (c == '\'') {
+                    sq = !sq;
+                    if (sq) next_start = i + 1;
                 }
-                else if (c == ' ') {
-                    if (val) {
+
+                if (!(dq || sq)) {
+                    if (c == '(') {
+                        next_start = ++i;
+                        int depth = 0;
+                        while (i <= end) {
+                            if (chars[i] == '(') depth++;
+                            else if (chars[i] == ')') {
+                                if (depth == 0) {
+                                    break;
+                                }
+                                depth--;
+                            }
+                            i++;
+                        }
+
+                        // inset command
+                        Object obj = handle(chars, next_start, i - 1, variables);
+                        if (variables.error) return null;
+                        variables.msg = null;
                         variables.set(
                                 cmd_index,
                                 param_count++,
-                                new String(chars, next_start, i-next_start)
+                                obj
                         );
-                        val = false;
+
+                        do i++;
+                        while (i <= end && chars[i] == ' ');
+
+                        next_start = i;
+                    } else if (c == ' ') {
+                        if (val) {
+                            variables.set(
+                                    cmd_index,
+                                    param_count++,
+                                    new String(chars, next_start, i - next_start)
+                            );
+                            val = false;
+                        }
+                        i++;
+                        next_start = i;
+                    } else {
+                        if (!val) next_start = i;
+                        val = true;
+                        i++;
                     }
-                    i++;
-                    next_start = i;
-                }
-                else {
-                    if (!val) next_start = i;
-                    val = true;
-                    i++;
-                }
-            }
-            else i++;
-        }
-
-        String cmd = null;
-        if (val) cmd = new String(chars, next_start, i-next_start);
-
-        if (val && param_count != 0) {
-            variables.set(cmd_index, param_count++, cmd);
-        }
-
-        variables.currentCommand(cmd_index);
-        for (int j = 0; j < variables.length(); j++) {
-            if (variables.at(j) instanceof String varn && varn.startsWith("$")) {
-                if (j == 0 && variables.has(j+1) && variables.at(j+1) instanceof String posib_eq && "=".equals(posib_eq)) {
-                    j++;
-                    continue;
-                }
-                String key = varn.substring(1);
-                variables.set(cmd_index, j, global_variables.get(key));
-            }
-        }
-
-//        System.out.printf("cmi: %d\tCmd: %s\tpc %d\thas 0: %b\n", cmd_index, cmd, param_count, variables.has(0));
-        if (param_count > 0) {
-            if (!variables.has(0)) return variables.trmsg(null);
-            else if (variables.at(0) instanceof String str) {
-                cmd = str;
-            }
-        }
-
-        if (cmd != null) {
-//            System.out.println("Executing cmd " + cmd);
-
-            if (cmd.startsWith("$")) {
-                if (variables.has(1) && "=".equalsIgnoreCase(variables.at(1))) {
-                    Object at = variables.at(2);
-                    global_variables.put(cmd.substring(1), at);
-                    return variables.trmsg(cmd + " = " + at);
-                }
+                } else i++;
             }
 
-            VarFunc func = singleton_commands.get(cmd);
-            if (func != null) {
-                return variables.trmsg(func.apply(variables.withLocalOffset(cmd_index, 1)));
+            String cmd = null;
+            if (val) cmd = new String(chars, next_start, i - next_start);
+
+            if (val && param_count != 0) {
+                variables.set(cmd_index, param_count++, cmd);
             }
-            if (param_count > 1) {
-                // try running a root command
-                Map<String, VarFunc> maps;
-                if ((maps = mltplx_commands.get(cmd)) != null) {
-                    VarFunc b = maps.get((String) variables.at((1)));
-                    if (b != null) {
-                        return variables.trmsg(b.apply(variables.withLocalOffset(cmd_index, 2)));
-                    }
-                }
-            }
-        }
 
-        if (param_count == 0) return variables.trmsg(cmd);
-
-        Mapper mapper;
-        int len = variables.length();
-//        System.out.println("P len: " + len);
-        Object ctx = variables.at(0);
-
-        for (int j = 1; j < len; j++) {
             variables.currentCommand(cmd_index);
-            Object v = variables.at(j);
-
-            mapper = null;
-            if (ctx instanceof MapperProvider mp_prov) {
-                mapper = mp_prov.getCall();
-            } else if (ctx instanceof Mapper mp) {
-                mapper = mp;
+            for (int j = 0; j < variables.length(); j++) {
+                if (variables.get(j) instanceof String varn && varn.startsWith("$")) {
+                    if (j == 0 && variables.has(j + 1) && variables.get(j + 1) instanceof String posib_eq && "=".equals(posib_eq)) {
+                        j++;
+                        continue;
+                    }
+                    String key = varn.substring(1);
+                    variables.set(cmd_index, j, global_variables.get(key));
+                }
             }
 
-//            System.out.printf("Mapper: %s, v: %s\n", mapper, v);
-
-            if (mapper != null && v instanceof String route) {
-                VarFunc f = mapper.get(route);
-//                System.out.printf("Found %s for %s\n", f, route);
-                ctx = Objects.requireNonNullElse(f, v);
+            if (param_count > 0) {
+                if (!variables.has(0)) return null;
+                else if (variables.get(0) instanceof String str) {
+                    cmd = str;
+                }
             }
 
-            if (ctx instanceof VarFunc vf) {
-                ctx = vf.apply(variables.withLocalOffset(cmd_index, j));
-//                System.out.println("Applied. Got " + ctx);
+            if (cmd != null) {
+                if (cmd.startsWith("$")) {
+                    if (variables.has(1) && "=".equals(variables.get(1))) {
+                        String key = cmd.substring(1);
+                        if (variables.has(2)) {
+                            Object obj = variables.get(2);
+                            global_variables.put(key, obj);
+                            variables.setMsg("Set " + cmd + " = " + obj);
+                            return obj;
+                        } else {
+                            global_variables.remove(key);
+                            variables.setMsg("Unset " + cmd);
+                            return null;
+                        }
+                    }
+                }
             }
+
+            Mapper mapper;
+            int len = variables.length();
+            Object ctx = null;
+            if (cmd != null) {
+                ctx = commands.get(cmd);
+            }
+
+            if (param_count == 0 && ctx == null) return cmd;
+
+            if (ctx == null) {
+                ctx = variables.get(0);
+            }
+
+            variables.currentCommand(cmd_index);
+
+            if (len <= 1 && ctx instanceof VarFunc vf) {
+                ctx = vf.apply(variables.withLocalOffset(cmd_index, 1));
+            }
+            for (int j = 0; j < len; j++) {
+                variables.currentCommand(cmd_index);
+
+                mapper = null;
+                if (ctx instanceof MapperProvider mp_prov) {
+                    mapper = mp_prov.getCall();
+                } else if (ctx instanceof Mapper mp) {
+                    mapper = mp;
+                }
+
+                if (mapper != null && variables.has(j) && variables.get(j) instanceof String route) {
+                    VarFunc f = mapper.get(route);
+                    if (f != null) ctx = f;
+                }
+
+                if (ctx instanceof VarFunc vf) {
+                    ctx = vf.apply(variables.withLocalOffset(cmd_index, j+1));
+                }
+            }
+
+            return ctx;
+        } catch (ClassCastException e) {
+            variables.err(e.getMessage());
+            return null;
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+//            variables.err(e.getMessage());
+//            return null;
         }
-
-        return variables.trmsg(ctx);
     }
 
 }
