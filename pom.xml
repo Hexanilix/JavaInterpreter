@@ -6,7 +6,7 @@
 
     <groupId>org.hetils</groupId>
     <artifactId>JavaInterpreter</artifactId>
-    <version>0.5.12</version>
+    <version>0.7.21</version>
 
     <properties>
         <maven.compiler.source>17</maven.compiler.source>

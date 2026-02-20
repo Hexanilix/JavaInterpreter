@@ -11,6 +11,7 @@ import java.util.function.Function;
 
 public class Interpreter {
 
+    public static final String VERSION = "0.7.21";
 
     private static boolean isEmpty(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; }
     private static boolean isEmpty(char @NotNull [] chars, int start, int end) {
@@ -95,8 +96,20 @@ public class Interpreter {
         while (i <= end) {
             char c = chars[i];
 
-            if (c == '\"') dq = !dq;
-            else if (c == '\'') sq = !sq;
+            if (c == '\\') {
+                i += 2;
+                val = true;
+                continue;
+            }
+
+            if (c == '\"') {
+                dq = !dq;
+                val = true;
+            }
+            else if (c == '\'') {
+                sq = !sq;
+                val = true;
+            }
 
             if (dq && sq) {
                 if (c == '(') {
@@ -120,7 +133,7 @@ public class Interpreter {
 
                     param_count++;
                 }
-                else if (isEmpty(c)) {
+                else if (isEmpty(c) || c == '\"' || c == '\'') {
                     if (val) {
                         param_count++;
                         val = false;
@@ -149,34 +162,25 @@ public class Interpreter {
         return s;
     }
 
-    private final Map<String, VarFunc> commands;
-    private final Map<String, Object> global_variables = new HashMap<>();
+
     private boolean always_treat_singles_as_cmds = true;
     private boolean always_set_last_output = false;
-    private String LAST_OUTPUT_VAR_NAME = "~";
-    public Interpreter() {
-        this(new HashMap<>(), true);
-    }
-    public Interpreter(Map<String, VarFunc> commands) {
-        this(commands, true);
-    }
+    private String last_output_var_name = "~";
+    private int unqe_margin = 10;
+
+    private final Map<String, VarFunc> commands;
+    private final Map<String, Object> global_variables = new HashMap<>();
+    public Interpreter() { this(new HashMap<>(), true); }
+    public Interpreter(Map<String, VarFunc> commands) { this(commands, true); }
     public Interpreter(Map<String, VarFunc> commands, boolean add_basic_commands) {
         this.commands = commands;
-        if (add_basic_commands) {
-            addBasicCommands();
-        }
+        if (add_basic_commands) addBasicCommands();
     }
 
-    public void alwaysTreatSinglesAsCommands(boolean value) {
-        this.always_treat_singles_as_cmds = value;
-    }
-    public void setLastOutputVarName(String name) {
-        this.LAST_OUTPUT_VAR_NAME = name;
-    }
-
-    public void alwaysSetLastOutput(boolean val) {
-        this.always_set_last_output = val;
-    }
+    public void alwaysTreatSinglesAsCommands(boolean value) { this.always_treat_singles_as_cmds = value; }
+    public void setLastOutputVarName(String name) { this.last_output_var_name = name; }
+    public void alwaysSetLastOutput(boolean val) { this.always_set_last_output = val; }
+    public void unresolvedQuoteErrorMargin(int margin) { this.unqe_margin = margin; }
 
     public class VariableSet {
         private final int[] cmd_var_counts;
@@ -216,6 +220,7 @@ public class Interpreter {
         private void currentCommand(int command) {
             this.local_offset = sum(cmd_var_counts, command);
             this.c_cmd = command;
+            this.consumed = 0;
         }
 
         private int functionLength(int cmd_index) {
@@ -226,6 +231,11 @@ public class Interpreter {
         private int locI(int index) {
             consumed = Math.max(index+1, consumed);
             return index+local_offset;
+        }
+
+        private @Nullable Object trySetLast(Object ctx) {
+            if (c_cmd == 0 || always_set_last_output) global_variables.put(last_output_var_name, ctx);
+            return ctx;
         }
 
         public int length() {
@@ -453,6 +463,7 @@ public class Interpreter {
                 };
             }
         }, false);
+        rootCommand("javaitpr", vars -> VERSION);
     }
 
     public Map<String, VarFunc> getCommands() {
@@ -493,13 +504,18 @@ public class Interpreter {
         } catch (Exception e) {
             throw new RuntimeException("Error during execution \"" + input + "\"", e);
         }
-        if (!eval.apply(r)) throw new RuntimeException("Bad behavior for \"" + input + "\", got: " + r);
+        if (!eval.apply(r)) throw new RuntimeException("Bad behavior for \"" + input + "\", got: " + (r != null ? r.getClass().getName() : "") + " " + r);
     }
     public @NotNull String process(@NotNull String input) {
-        char[] chars = input.toCharArray();
-        VariableSet vs = new VariableSet(chars);
-        Object res = handle(chars, 0, chars.length-1, vs);
-        return vs.msg != null ? vs.msg : Objects.toString(res);
+        try {
+            char[] chars = input.toCharArray();
+            VariableSet vs = new VariableSet(chars);
+            Object res = handle(chars, 0, chars.length - 1, vs);
+            return vs.msg != null ? vs.msg : Objects.toString(res);
+        } catch (Exception e) {
+//            return e.getMessage();
+            throw new RuntimeException(e);
+        }
     }
     public @Nullable Object handle(@NotNull String input) {
         char[] chars = input.toCharArray();
@@ -525,31 +541,54 @@ public class Interpreter {
         boolean val = false;
         boolean dq = false;
         boolean sq = false;
+        boolean force_add = false;
+        int depth = 0;
+        StringBuilder buff = new StringBuilder();
         while (i <= end) {
+            if (force_add) {
+                buff.append(chars[i++]);
+                val = true;
+                force_add = false;
+                continue;
+            }
             char c = chars[i];
+
+
+            if (c == '\\') {
+                i++;
+                force_add = true;
+                continue;
+            }
 
             if (c == '\"') {
                 dq = !dq;
+                val = true;
                 if (dq) next_start = i + 1;
             } else if (c == '\'') {
                 sq = !sq;
+                val = true;
                 if (sq) next_start = i + 1;
             }
 
-            if (!(dq || sq)) {
+            if (dq || sq) {
+                if (c != '\"' && c != '\'') buff.append(c);
+                i++;
+            }
+            else {
                 if (c == '(') {
+                    depth++;
                     next_start = ++i;
-                    int depth = 0;
                     while (i <= end) {
                         if (chars[i] == '(') depth++;
                         else if (chars[i] == ')') {
+                            depth--;
                             if (depth == 0) {
                                 break;
                             }
-                            depth--;
                         }
                         i++;
                     }
+                    if (depth != 0) break;
 
                     // inset command
                     Object obj = handle(chars, next_start, i - 1, variables);
@@ -565,13 +604,15 @@ public class Interpreter {
                     while (i <= end && chars[i] == ' ');
 
                     next_start = i;
-                } else if (c == ' ') {
+                } else if (c == ' ' || c == '\"' || c == '\'') {
                     if (val) {
                         variables.set(
                                 cmd_index,
                                 param_count++,
-                                new String(chars, next_start, i - next_start)
+//                                new String(chars, next_start, i - next_start) saves 3ns I guess
+                                buff.toString()
                         );
+                        buff.setLength(0);
                         val = false;
                     }
                     i++;
@@ -579,31 +620,31 @@ public class Interpreter {
                 } else {
                     if (!val) next_start = i;
                     val = true;
+                    buff.append(c);
                     i++;
                 }
-            } else i++;
+            }
         }
 
+        // Erros
+        if (dq || sq) return syntaxError(chars, variables, next_start, "Unresolved quote at ");
+        else if (depth != 0) return syntaxError(chars, variables, next_start, "Unresolved parentheses at ");
+        else if (force_add) return variables.err("Empty escape at end");
+
         String cmd = null;
-        if (val) cmd = new String(chars, next_start, i - next_start);
+        if (val) cmd =
+//                    new String(chars, next_start, i - next_start); saves 3ns I guess
+                    buff.toString();
 
         if (val && param_count != 0) {
             variables.set(cmd_index, param_count++, cmd);
             cmd = null;
         }
 
+        // make sure variables know what level we're on
         variables.currentCommand(cmd_index);
-        for (int j = 0; j < variables.length(); j++) {
-            if (variables.get(j) instanceof String varn && varn.startsWith("$")) {
-                if (j == 0 && variables.has(j + 1) && variables.get(j + 1) instanceof String posib_eq && "=".equals(posib_eq)) {
-                    j++;
-                    continue;
-                }
-                String key = varn.substring(1);
-                variables.set(cmd_index, j, global_variables.get(key));
-            }
-        }
 
+        // assign first variable (the command), unless there are no other arguments
         if (param_count > 0) {
             if (!variables.has(0)) return null;
             else if (variables.get(0) instanceof String str) {
@@ -611,32 +652,45 @@ public class Interpreter {
             }
         }
 
-        Object ctx = null;
-        if (cmd != null) {
-            if (cmd.startsWith("$")) {
-                if (variables.has(1) && "=".equals(variables.get(1))) {
-                    String key = cmd.substring(1);
-                    if (variables.has(2)) {
-                        Object obj = variables.get(2);
-                        global_variables.put(key, obj);
-                        variables.msg("Set " + cmd + " = " + (obj instanceof String s ? "\"" + s + "\"" : obj));
-                        return obj;
-                    } else {
-                        global_variables.remove(key);
-                        variables.msg("Unset " + cmd);
-                        return null;
-                    }
-                } else if (param_count == 0) {
-                    String key = cmd.substring(1);
-                    return global_variables.containsKey(key) ?
-                            cmd + " = " + global_variables.get(key) :
-                            "unset";
+        // $ wildcard operations
+        if (cmd != null && cmd.startsWith("$")) {
+            // assignment
+            if (variables.has(1) && "=".equals(variables.get(1))) {
+                String key = cmd.substring(1);
+                if (variables.has(2)) {
+                    Object obj = variables.get(2);
+                    global_variables.put(key, obj);
+                    variables.msg("Set " + cmd + " = " + (obj instanceof String s ? "\"" + s + "\"" : obj));
+                    return variables.trySetLast(obj);
                 }
+                // unassign if no other value is present
+                else {
+                    global_variables.remove(key);
+                    variables.msg("Unset " + cmd);
+                    return null;
+                }
+            }
+            // value retrieval
+            else if (param_count == 0) {
+                String key = cmd.substring(1);
+                Object v;
+                if (global_variables.containsKey(key)) {
+                    return variables.msg(cmd + " = " + (v = global_variables.get(key)), v);
+                } else return variables.msg("unset");
             }
         }
 
-        Mapper mapper;
-        int len = variables.length();
+        // substitute $... for global named variables
+        for (int j = 0; j < variables.length(); j++) {
+            if (variables.get(j) instanceof String varn && varn.startsWith("$")) {
+                String key = varn.substring(1);
+                variables.set(cmd_index, j, global_variables.get(key));
+                if (j == 0) cmd = null;
+            }
+        }
+
+        Object ctx = null;
+
         if (cmd != null) {
             ctx = commands.get(cmd);
             if (ctx == null && always_treat_singles_as_cmds) {
@@ -650,43 +704,60 @@ public class Interpreter {
         }
 
         variables.currentCommand(cmd_index);
-        try {
-            int j = 0;
-            if (len <= 1 && ctx instanceof VarFunc vf) {
-                ctx = vf.apply(variables.withLocalOffset(cmd_index, 1));
-                variables.consumed = 0;
-                j++;
-            }
-            for (; j < len; j++) {
-                variables.currentCommand(cmd_index);
-
-                mapper = null;
-                if (ctx instanceof MapperProvider mp_prov) {
-                    mapper = mp_prov.getMapper();
-                } else if (ctx instanceof Mapper mp) {
-                    mapper = mp;
-                }
-
-                if (mapper != null && j > 0 && variables.has(j) && variables.get(j) instanceof String route) {
-                    VarFunc f = mapper.get(route);
-                    if (f != null) ctx = f;
-                    else return variables.err("Unknown command \"" + route + "\" in \"" + variables.get(j-1) + "\"");
-                }
-                variables.consumed = 0;
-
-                if (ctx instanceof VarFunc vf) {
-                    ctx = vf.apply(variables.withLocalOffset(cmd_index, j+1));
-                    j += variables.consumed;
-                    variables.consumed = 0;
-                }
-            }
-
-            // last output var
-            if (cmd_index == 0 || always_set_last_output) variables.set(LAST_OUTPUT_VAR_NAME, ctx);
-            return ctx;
-        } catch (Exception e) {
-            return variables.err(e.getMessage());
+        int len = variables.length();
+        int k = 0;
+        // check if
+        if (len <= 1 && ctx instanceof VarFunc vf) {
+            ctx = vf.apply(variables.withLocalOffset(cmd_index, 1));
+            // assume vf is a root function and consumes no variables
+            variables.consumed = 0;
+            k++;
         }
+        for (; k < len; k++) {
+            // reset depth
+            variables.currentCommand(cmd_index);
+
+            // try to get a mapper for subcommands
+            Mapper mapper = null;
+            if (ctx instanceof MapperProvider mp_prov) {
+                mapper = mp_prov.getMapper();
+            } else if (ctx instanceof Mapper mp) {
+                mapper = mp;
+            }
+
+            // try to route to a sub command
+            if (mapper != null && k > 0 && variables.has(k) && variables.get(k) instanceof String route) {
+                VarFunc f = mapper.get(route);
+                if (f != null) ctx = f;
+                else return variables.err("Unknown command \"" + route + "\" in \"" + variables.get(k-1) + "\"");
+            }
+            // reset "consumed" because the previous get added
+            variables.consumed = 0;
+
+            // if current context is a function (both sub commands and command executions), run it
+            if (ctx instanceof VarFunc vf) {
+                ctx = vf.apply(variables.withLocalOffset(cmd_index, k+1));
+                // ensure
+                k += variables.consumed;
+                variables.consumed = 0;
+            }
+        }
+
+        // last output var
+        return variables.trySetLast(ctx);
     }
 
+    private @Nullable Object syntaxError(char @NotNull [] chars, @NotNull VariableSet variables, int next_start, String msg) {
+        int starti = Math.max(next_start - unqe_margin, 0);
+        int st_len = next_start - starti;
+        int endi = Math.min(chars.length, next_start + unqe_margin);
+        int count = endi - starti;
+        String base =  + next_start + ": ";
+        return variables.err(base +
+                new String(
+                        chars,
+                        starti,
+                        count
+                ) + msg + "\n" + " ".repeat(base.length() + st_len - 1) + "^");
+    }
 }
